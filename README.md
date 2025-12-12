@@ -11,7 +11,7 @@ this repository includes:
 - supporting study materials (protocols and prompt wording)  
 - rmarkdown script for data processing  
 
-## the primary output is `data/clean/ema_flags_master.csv`.
+## the primary output is `data/clean/ema_flags_master.csv`
 each row represents `id × date × session`. the file includes:
 
 ### harmonized identifiers and timing
