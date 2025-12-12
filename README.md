@@ -14,9 +14,9 @@ this repository includes:
 ## the primary output is `data/clean/ema_flags_master.csv`
 each row represents `id × date × session`. the file includes:
 
-### harmonized identifiers and timing
+### merged ids and timing
 - standardized ids  
-- cleaned dates and session assignment (morning, afternoon, evening)  
+- cleaned dates and sessions (morning, afternoon, evening)  
 - aligned mood and event surveys  
 - merged sleep data for morning prompts  
 
