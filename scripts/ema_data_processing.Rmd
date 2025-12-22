@@ -1027,14 +1027,15 @@ print(colnames(df_se))
 print("--- df_sleep (Daily Sleep Data Columns) ---")
 print(colnames(df_sleep))
 ```
+
 ```{r}
 library(tidyverse)
 library(lubridate)
 
-base_path  <- "/users/eu/documents/github/ema-brain/data/raw/" 
+base_path  <- "/Users/eu/Documents/GitHub/els_ema_data/data/raw/" 
 df_emo     <- read.csv(paste0(base_path, "2_daily_emo_total_data.csv"), stringsAsFactors = FALSE) 
-df_se      <- read.csv(paste0(base_path, "2_daily_se_total_data.csv"), stringsAsFactors = FALSE) 
-df_sleep   <- read.csv(paste0(base_path, "2_daily_sleep_total_data.csv"), stringsAsFactors = FALSE) 
+df_se      <- read.csv(paste0(base_path, "2_daily_se_total_data.csv"), stringsAsFactors = FALSE)
+df_sleep   <- read.csv(paste0(base_path, "2_daily_sleep_total_data.csv"), stringsAsFactors = FALSE)
 
 #clean functions
 clean_time <- function(x) {
@@ -1174,11 +1175,11 @@ master_merged <- full_join(emo_clean, se_clean, by = c("clean_id", "date", "sess
 
 # calculate study day and apply max filter
 master_merged <- master_merged %>%
+  filter(!is.na(date)) %>% 
   group_by(clean_id) %>%
-  mutate(study_day = as.numeric(as.Date(date) - min(as.Date(date))) + 1) %>%
+  mutate(study_day = as.numeric(as.Date(date) - min(as.Date(date), na.rm = TRUE)) + 1) %>%
   ungroup() %>%
   filter(study_day <= 16)
-
 
 ema_flags_master <- master_merged %>%
   rowwise() %>%
@@ -1195,7 +1196,7 @@ ema_flags_master <- master_merged %>%
     dur_event    = as.numeric(difftime(dt_end_event, dt_start_event, units="secs")),
     dur_sleep    = as.numeric(difftime(dt_end_sleep, dt_start_sleep, units="secs")),
     
-    # prompt-level metrics for flags
+    # prompt-level metrics
     mood_vector  = list(c_across(c(emo_sad, emo_angry, emo_grouchy, emo_worried, emo_anxious, emo_happy, emo_cheerful, emo_excited, emo_energetic))),
     mood_mean    = mean(unlist(mood_vector), na.rm=TRUE),
     mood_sd      = sd(unlist(mood_vector), na.rm=TRUE),
@@ -1206,14 +1207,14 @@ ema_flags_master <- master_merged %>%
     event_sd     = sd(unlist(event_vector), na.rm=TRUE),
     event_mode_prop= calc_modal_pct(unlist(event_vector)),
 
-    # 1. mood flags (9 items)
-    flag_speed_mood  = ifelse(!is.na(dur_mood) & dur_mood <= NUM_MOOD_ITEMS, 1L, 0L),
+    # 1. mood flags
+    flag_speed_mood  = ifelse(!is.na(dur_mood) & dur_mood <= num_mood_items, 1L, 0L),
     flag_var_mood    = ifelse(!is.na(mood_sd) & mood_sd <= 5 & mood_mean > 10, 1L, 0L),
     flag_modal_mood  = ifelse(!is.na(mood_mode_prop) & mood_mode_prop >= 0.60 & mood_mean > 10, 1L, 0L),
     any_flag_mood    = ifelse(flag_speed_mood==1 | flag_var_mood==1 | flag_modal_mood==1, 1L, 0L),
     
-    # 2. event flags (3 items)
-    flag_event_speed = ifelse(!is.na(dur_event) & dur_event <= NUM_EVENT_ITEMS, 1L, 0L),
+    # 2. event flags
+    flag_event_speed = ifelse(!is.na(dur_event) & dur_event <= num_event_items & event_occurred_clean == "yes", 1L, 0L),
     flag_event_var   = ifelse(!is.na(event_sd) & event_sd <= 5 & event_mean > 10, 1L, 0L),
     flag_event_modal = ifelse(!is.na(event_mode_prop) & event_mode_prop >= 0.60 & event_mean > 10, 1L, 0L),
     any_flag_event   = ifelse(flag_event_speed==1 | flag_event_var==1 | flag_event_modal==1, 1L, 0L),
@@ -1223,9 +1224,9 @@ ema_flags_master <- master_merged %>%
     flag_sleep_bounds  = ifelse(!is.na(sleep_hours) & (sleep_hours < 0 | sleep_hours > 18), 1L, 0L),
     any_flag_sleep     = ifelse(flag_sleep_effort==1 | flag_sleep_bounds==1, 1L, 0L),
     
-    # 4. missingness and drift
-    flag_missing_mood  = ifelse(!is.na(event_mean) & is.na(mood_mean), 1L, 0L),
-    flag_missing_event = ifelse(!is.na(mood_mean) & is.na(event_mean), 1L, 0L),
+    # 4. missingness and drift 
+  flag_missing_mood  = ifelse(!is.na(event_occurred_clean) & is.na(mood_mean), 1L, 0L),
+    flag_missing_event = ifelse(!is.na(mood_mean) & is.na(event_occurred_clean), 1L, 0L),
     flag_event_inconsistent = ifelse(event_occurred_clean == "yes" & is.na(event_stress_num), 1L, 0L), 
 
     drift_seconds      = abs(as.numeric(difftime(dt_start_emo, dt_start_event, units="secs"))),
@@ -1262,15 +1263,22 @@ ema_flags_master <- master_merged %>%
     emo_sad, emo_angry, emo_grouchy, emo_worried, emo_anxious, emo_happy, emo_cheerful, emo_excited, emo_energetic, 
     emo_bored, emo_want_people, emo_want_alone, emo_who_with, emo_face_to_face, emo_digital_conv,
     # event items 
-    event_significant, event_stress_raw, event_importance_raw, event_control_raw,
+    event_occurred_clean, event_significant, event_stress_raw, event_importance_raw, event_control_raw,
     # sleep items
     sleep_quality, sleep_hours
   )
 
-
-# output csv 
-dir.create("data/clean", showWarnings = FALSE, recursive = TRUE)
-write.csv(ema_flags_master, "data/clean/ema_flags_master.csv", row.names = FALSE)
+print("--- counts---")
+print(summary(ema_flags_master %>% select(n_valid_event_raw, n_valid_mood_raw)))
 ```
+
+```{r}
+total_participants <- n_distinct(ema_flags_master$clean_id)
+total_rows <- nrow(ema_flags_master)
+
+print(paste(total_participants))
+print(paste(total_rows))
+```
+
 
 
