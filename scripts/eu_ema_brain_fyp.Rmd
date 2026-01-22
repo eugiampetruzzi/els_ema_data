@@ -1,0 +1,876 @@
+---
+title: "eu_ema_brain_fyp"
+author: "eugenia giampetruzzi"
+date: "2026-01-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# set-up
+
+```{r}
+library(dplyr)
+library(readr)
+library(tibble)
+library(stringr)
+library(purrr)
+library(knitr)
+library(lme4)
+library(lmerTest)
+library(nlme)
+library(broom.mixed)
+library(lubridate)
+```
+
+```{r}
+person_path <- "/Users/eu/Library/CloudStorage/OneDrive-Stanford/Research Projects/9 - EMA-Brain/fronto_amygdala_ema_reactivity_T3T4.csv"
+prompt_path <- "/Users/eu/Documents/GitHub/els_ema_data/data/clean/ema_flags_master.csv"
+
+df_person <- read_csv(person_path, show_col_types = FALSE) %>%
+  mutate(els_id = as.character(els_id))
+
+df_prompts_raw <- read_csv(prompt_path, show_col_types = FALSE) %>%
+  mutate(els_id = as.character(clean_id))
+
+na_items <- c("emo_sad", "emo_angry", "emo_grouchy", "emo_worried", "emo_anxious")
+pa_items <- c("emo_happy", "emo_cheerful", "emo_excited", "emo_energetic")
+
+df_prompts <- df_prompts_raw %>%
+  filter(!flag_missing_mood, !flag_missing_event, !flag_event_inconsistent) %>%
+  mutate(
+    stress_numeric = suppressWarnings(readr::parse_number(as.character(event_stress_raw))),
+    
+    event_numeric = case_when(
+      tolower(event_occurred_clean) %in% c("yes", "true", "1") ~ 1,
+      tolower(event_occurred_clean) %in% c("no", "false", "0") ~ 0,
+      TRUE ~ NA_real_
+    ),
+
+    na = rowMeans(across(all_of(na_items)), na.rm = TRUE),
+    pa = rowMeans(across(all_of(pa_items)), na.rm = TRUE),
+    
+    stress = if_else(event_numeric == 1, stress_numeric, 0)
+  )
+```
+
+```{r}
+r_ver <- as.character(getRversion())
+r_ver
+```
+
+# samples
+
+## behavioral
+
+```{r}
+ids_var <- df_prompts %>%
+  group_by(els_id) %>%
+  summarise(
+    n_event = sum(event_numeric == 1, na.rm = TRUE),
+    n_noevent = sum(event_numeric == 0, na.rm = TRUE)
+  ) %>%
+  filter(n_event >= 1, n_noevent >= 1) %>%
+  pull(els_id)
+
+cat("ids:", length(ids_var), "\n")
+```
+
+## neural
+
+## descriptives
+
+```         
+```
+
+```{r}
+df_desc <- df_beh %>%
+  group_by(els_id) %>%
+  summarise(
+    mean_na = mean(na, na.rm = TRUE),
+    mean_pa = mean(pa, na.rm = TRUE),
+    n_prompts = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group = case_when(
+      els_id %in% final_mri_ids ~ "Neural",
+      TRUE ~ "Behavioral_Only"
+    )
+  )
+
+group_stats <- df_desc %>%
+  group_by(group) %>%
+  summarise(
+    N = n(),
+    NA_Mean = mean(mean_na), NA_SD = sd(mean_na),
+    PA_Mean = mean(mean_pa), PA_SD = sd(mean_pa),
+    Prompts_Mean = mean(n_prompts), Prompts_SD = sd(n_prompts)
+  )
+kable(group_stats, caption = "Descriptives by Subsample")
+
+t_na <- t.test(mean_na ~ group, data = df_desc)
+t_pa <- t.test(mean_pa ~ group, data = df_desc)
+t_pr <- t.test(n_prompts ~ group, data = df_desc)
+
+tibble(
+  Variable = c("Negative Affect", "Positive Affect", "Compliance (# Prompts)"),
+  t_stat = c(t_na$statistic, t_pa$statistic, t_pr$statistic),
+  p_value = c(t_na$p.value, t_pa$p.value, t_pr$p.value)
+) %>%
+  kable(caption = "Neural vs. Behavioral Only")
+```
+
+# stress-affect
+
+## prelim
+
+```{r}
+m_prelim_na <- lmer(na ~ stress_dev + stress_mean + (1 + stress_dev | els_id), 
+                    data = df_long_brain)
+summary(m_prelim_na)
+
+m_prelim_pa <- lmer(pa ~ stress_dev + stress_mean + (1 + stress_dev | els_id), 
+                    data = df_long_brain)
+summary(m_prelim_pa)
+```
+
+```{r}
+fit_prelim_age_sex <- function(dat, outcome, sample_label) {
+  d_use <- dat %>%
+    select(els_id, stress_dev, stress_mean, age_c, sex_t1, all_of(outcome)) %>%
+    drop_na() %>%
+    mutate(sex_f = relevel(as.factor(sex_t1), ref = "1")) 
+  
+  f_base <- as.formula(paste0(outcome, " ~ stress_dev + stress_mean + (1 + stress_dev | els_id)"))
+  
+  f_main <- as.formula(paste0(outcome, " ~ stress_dev + stress_mean + age_c + sex_f + (1 + stress_dev | els_id)"))
+  
+  f_int  <- as.formula(paste0(outcome, " ~ stress_dev + stress_mean + age_c + sex_f + ",
+                              "stress_dev:age_c + stress_dev:sex_f + (1 + stress_dev | els_id)"))
+
+  m_base <- lmer(f_base, data = d_use, REML = FALSE)
+  m_main <- lmer(f_main, data = d_use, REML = FALSE)
+  m_int  <- lmer(f_int,  data = d_use, REML = FALSE)
+
+  lrt_main <- anova(m_base, m_main)
+  
+  lrt_int  <- anova(m_main, m_int)
+
+  tt <- broom.mixed::tidy(m_int, effects = "fixed") %>%
+    filter(str_detect(term, "stress_dev|age_c|sex")) %>%
+    mutate(sample = sample_label, outcome = outcome)
+
+  lrt <- tibble(
+    sample = sample_label,
+    outcome = outcome,
+    chisq_main = lrt_main$Chisq[2],
+    p_main     = lrt_main$`Pr(>Chisq)`[2],
+    chisq_int  = lrt_int$Chisq[2],
+    p_int      = lrt_int$`Pr(>Chisq)`[2]
+  )
+
+  list(lrt = lrt, terms = tt)
+}
+
+run_all <- function(dat, label) {
+  out_na <- fit_prelim_age_sex(dat, "na", label)
+  out_pa <- fit_prelim_age_sex(dat, "pa", label)
+  list(
+    lrt = bind_rows(out_na$lrt, out_pa$lrt),
+    terms = bind_rows(out_na$terms, out_pa$terms)
+  )
+}
+
+res_beh <- run_all(df_long_beh, "behavioral")
+res_mri <- run_all(df_long_brain, "mri")
+
+lrt_tbl <- bind_rows(res_beh$lrt, res_mri$lrt)
+terms_tbl <- bind_rows(res_beh$terms, res_mri$terms)
+
+kable(lrt_tbl, caption = "LRT: Age & Sex Moderation")
+kable(terms_tbl, caption = "Fixed Effects: Age & Sex Moderation")
+```
+
+## neural moderation
+
+```{r}
+make_edge_list <- function(seed_prefix, targets, available_cols) {
+  full_names <- paste0(seed_prefix, "_Amygdala__", targets)
+  valid_names <- intersect(full_names, available_cols)
+  return(valid_names)
+}
+
+keep_min_ids_person <- function(person_dat, cols, min_ids = 70) {
+  if (length(cols) == 0) return(character(0))
+  n_nonmiss <- vapply(cols, function(v) sum(!is.na(person_dat[[v]])), numeric(1))
+  
+  dropped <- cols[n_nonmiss < min_ids]
+  if (length(dropped) > 0) {
+    cat("dropping low-N edges:", paste(dropped, collapse=", "), "\n")
+  }
+  
+  cols[n_nonmiss >= min_ids]
+}
+
+min_ids <- 70
+
+# salience (frontal operculum, OFC, vlPFC)
+h1_target_suffixes <- c(
+  paste0("LH_SalVentAttn_FrOperIns_", 1:4),
+  paste0("RH_SalVentAttn_FrOperIns_", 1:4),
+  paste0("LH_Limbic_OFC_", 1:2),
+  "LH_Cont_OFC_1",
+  paste0("RH_Limbic_OFC_", 1:3),
+  "LH_SalVentAttn_PFCl_1",
+  "RH_SalVentAttn_PFCl_1"
+)
+
+# regulatory control (vmPFC, dmPFC, dlPFC, vlPFC, mPFC)
+h2_target_suffixes <- c(
+  paste0("LH_Default_PFC_", 1:4),
+  "RH_Default_PFCv_1",
+  paste0("LH_Default_PFC_", 11:13),
+  paste0("RH_Default_PFCdPFCm_", 1:3),
+  paste0("LH_Cont_PFCl_", 2:4),
+  paste0("RH_Cont_PFCl_", 2:4),
+  "RH_Cont_PFCv_1",
+  paste0("RH_Cont_PFCmp_", 1:2)
+)
+
+all_cols <- names(df_person)
+
+raw_h1_lh <- make_edge_list("LH", h1_target_suffixes, all_cols)
+raw_h1_rh <- make_edge_list("RH", h1_target_suffixes, all_cols)
+raw_h2_lh <- make_edge_list("LH", h2_target_suffixes, all_cols)
+raw_h2_rh <- make_edge_list("RH", h2_target_suffixes, all_cols)
+
+edge_sets <- list(
+  h1_salience_lh_seed = keep_min_ids_person(df_person, raw_h1_lh, min_ids),
+  h1_salience_rh_seed = keep_min_ids_person(df_person, raw_h1_rh, min_ids),
+  h2_regulatory_lh_seed = keep_min_ids_person(df_person, raw_h2_lh, min_ids),
+  h2_regulatory_rh_seed = keep_min_ids_person(df_person, raw_h2_rh, min_ids)
+)
+
+print(lengths(edge_sets))
+```
+
+**note: 4 OFC nodes dropped due to coverage issues**
+
+```{r}
+all_brain_cols <- unique(unlist(edge_sets))
+
+df_long_brain_std <- df_long_brain %>%
+  mutate(across(all_of(all_brain_cols), scale))
+
+
+fit_omnibus_ri <- function(dat, edges, set_name) {
+  if (length(edges) == 0) return(NULL)
+
+  d_use <- dat %>%
+    select(els_id, na, stress_dev, stress_mean, age_c, sex_f, all_of(edges)) %>%
+    drop_na()
+  
+  edge_sum <- paste(edges, collapse = " + ")
+ 
+  
+  f_null <- as.formula(paste0("na ~ stress_dev + stress_mean + age_c + sex_f + (", edge_sum, ") + (1 | els_id)"))
+  f_full <- as.formula(paste0("na ~ stress_dev * (", edge_sum, ") + stress_mean + age_c + sex_f + (1 | els_id)"))
+
+  m_null <- lmer(f_null, data = d_use, REML = FALSE)
+  m_full <- lmer(f_full, data = d_use, REML = FALSE)
+  
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_edges = length(edges),
+    chisq   = lrt$Chisq[2],
+    p_lrt   = lrt$`Pr(>Chisq)`[2]
+  )
+  
+  terms <- broom.mixed::tidy(m_full, effects = "fixed") %>%
+    filter(str_detect(term, ":")) %>%      
+    filter(!str_detect(term, "age_c|sex_f")) %>% 
+    mutate(
+      network = set_name,
+      p_fdr = p.adjust(p.value, method = "BH") 
+    ) %>%
+    select(network, term, estimate, statistic, p.value, p_fdr)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_final <- imap(edge_sets, ~fit_omnibus_ri(df_long_brain_std, .x, .y))
+
+omnibus_tbl_final <- bind_rows(map(fits_final, "omnibus")) %>% 
+  mutate(p_fdr_sets = p.adjust(p_lrt, method = "BH")) %>%
+  arrange(desc(chisq)) 
+
+terms_tbl_final <- bind_rows(map(fits_final, "terms"))
+
+kable(omnibus_tbl_final, caption = "Omnibus LRT Results (Standardized + Random Intercepts)")
+kable(terms_tbl_final %>% filter(p_fdr < 0.05), caption = "Significant Edge Interactions (FDR < .05)")
+```
+
+# sensitivity
+
+## effort
+
+```{r}
+mode_prop_num <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(NA_real_)
+  tab <- table(x)
+  as.numeric(max(tab) / length(x))
+}
+
+screen_effort_prompts <- function(df, affect_cols, modal_prop_thresh = 0.90, sd_thresh = 1.0) {
+  stopifnot(all(affect_cols %in% names(df)))
+
+  df_flagged <- df %>%
+    rowwise() %>%
+    mutate(
+      modal_prop_affect = mode_prop_num(c_across(all_of(affect_cols))),
+      sd_affect_items   = sd(c_across(all_of(affect_cols)), na.rm = TRUE),
+      flag_excessive_modal      = !is.na(modal_prop_affect) & modal_prop_affect >= modal_prop_thresh,
+      flag_low_withinprompt_var = !is.na(sd_affect_items) & sd_affect_items <= sd_thresh,
+      flag_low_effort = flag_excessive_modal | flag_low_withinprompt_var
+    ) %>%
+    ungroup()
+
+  qc <- df_flagged %>%
+    summarise(
+      prompts_in = n(),
+      excl_excessive_modal = sum(flag_excessive_modal, na.rm = TRUE),
+      excl_low_withinprompt_var = sum(flag_low_withinprompt_var, na.rm = TRUE),
+      excl_low_effort_total = sum(flag_low_effort, na.rm = TRUE),
+      prompts_out = sum(!flag_low_effort, na.rm = TRUE),
+      retention_pct = 100 * prompts_out / prompts_in
+    )
+
+  list(
+    df = df_flagged %>%
+      filter(!flag_low_effort) %>%
+      select(-starts_with("flag_"), -modal_prop_affect, -sd_affect_items),
+    qc = qc,
+    flagged = df_flagged %>% filter(flag_low_effort)
+  )
+}
+
+eff <- screen_effort_prompts(
+  df = df_prompts, 
+  affect_cols = c(na_items, pa_items),
+  modal_prop_thresh = 0.90,
+  sd_thresh = 1.0
+)
+
+df_prompt_effort <- eff$df
+print(eff$qc)
+
+make_long_subset <- function(df_p, ids) {
+  df_p %>%
+    filter(els_id %in% ids) %>%
+    group_by(els_id) %>%
+    mutate(
+      stress_mean = mean(stress, na.rm = TRUE),
+      stress_dev  = stress - stress_mean
+    ) %>%
+    ungroup() %>%
+    left_join(df_person, by = "els_id") %>%
+    mutate(
+      age_c = as.numeric(scale(age_at_first_prompt, center = TRUE, scale = FALSE)),
+      sex_f = relevel(as.factor(sex_t1), ref = "1")
+    )
+}
+
+df_long_primary <- make_long_subset(df_prompts, final_mri_ids)
+df_long_effort  <- make_long_subset(df_prompt_effort, final_mri_ids)
+
+fit_one_set_effort <- function(dat, edges, set_name) {
+  if (length(edges) == 0) return(NULL)
+
+  vars_needed <- c("na","stress_dev","stress_mean","age_c","sex_f","els_id", edges)
+  d_use <- dat %>% select(all_of(vars_needed)) %>% drop_na()
+
+  for (v in edges) d_use[[v]] <- as.numeric(scale(d_use[[v]], TRUE, TRUE))
+  edges_str <- paste(edges, collapse = " + ")
+
+  f_null <- as.formula(paste0("na ~ stress_dev + stress_mean + age_c + sex_f + (", edges_str, ") + (1 | els_id)"))
+  f_full <- as.formula(paste0("na ~ stress_dev * (", edges_str, ") + stress_mean + age_c + sex_f + (1 | els_id)"))
+
+  m_null <- lmer(f_null, data = d_use, REML = FALSE)
+  m_full <- lmer(f_full, data = d_use, REML = FALSE)
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_rows = nrow(d_use),
+    n_ids  = n_distinct(d_use$els_id),
+    df     = length(edges),
+    chisq  = lrt$Chisq[2],
+    p_lrt  = lrt$`Pr(>Chisq)`[2]
+  )
+
+  terms <- broom.mixed::tidy(m_full, effects = "fixed") %>%
+    filter(str_detect(term, ":")) %>% 
+    filter(!str_detect(term, "age_c|sex_f")) %>%
+    mutate(
+      network = set_name,
+      p_fdr = p.adjust(p.value, method = "BH")
+    ) %>%
+    select(network, term, estimate, statistic, p.value, p_fdr)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+run_all_sets <- function(dat) {
+  fits <- imap(edge_sets, ~fit_one_set_effort(dat, .x, .y))
+  omnibus_tbl <- bind_rows(map(fits, "omnibus")) %>% mutate(p_fdr_4sets = p.adjust(p_lrt, method = "BH")) %>% arrange(p_lrt)
+  terms_tbl <- bind_rows(map(fits, "terms"))
+  list(omnibus = omnibus_tbl, terms = terms_tbl)
+}
+
+res_effort  <- run_all_sets(df_long_effort)
+
+kable(res_effort$omnibus, caption = "Effort Filter: Omnibus Results")
+kable(res_effort$terms %>% filter(p_fdr < 0.05), caption = "Effort Filter: Significant Edges")
+```
+
+## compliance
+
+```{r}
+z <- function(x) as.numeric(scale(x))
+thr_vec <- c(10, 15, 20) 
+
+fit_one_set_comp <- function(dat, edges, set_name) {
+  if (length(edges) == 0) return(NULL)
+
+  vars_needed <- c("els_id", "na", "stress_dev", "stress_mean", "age_c", "sex_f", edges)
+  d_use <- dat %>% select(all_of(vars_needed)) %>% drop_na()
+
+  d_use <- d_use %>%
+    mutate(
+      na_z = z(na),
+      stress_dev_z = z(stress_dev),
+      stress_mean_z= z(stress_mean),
+      age_scan_z    = z(age_c)
+    )
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+  
+  f_null <- as.formula(paste0("na_z ~ stress_dev_z + stress_mean_z + age_scan_z + sex_f + (", int_terms, ") + (1 | els_id)"))
+  f_full <- as.formula(paste0("na_z ~ stress_dev_z * (", int_terms, ") + stress_mean_z + age_scan_z + sex_f + (1 | els_id)"))
+
+  m_null <- lmer(f_null, data = d_use, REML = FALSE)
+  m_full <- lmer(f_full, data = d_use, REML = FALSE)
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = length(edges),
+    chisq   = lrt$Chisq[2],
+    p_lrt   = lrt$`Pr(>Chisq)`[2]
+  )
+
+  terms <- broom.mixed::tidy(m_full, effects = "fixed") %>%
+    filter(str_detect(term, ":")) %>%
+    filter(!str_detect(term, "age_c|sex_f")) %>%
+    mutate(
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    select(network, term, estimate, statistic, p.value, p_fdr)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+run_compliance_sensitivity <- function(dat, thr) {
+  d_thr <- dat %>% filter(n_valid_prompts >= thr)
+  fits <- imap(edge_sets, \(edges, nm) fit_one_set_comp(d_thr, edges, nm))
+  omnibus_tbl <- bind_rows(lapply(fits, `[[`, "omnibus")) %>% mutate(threshold = thr, p_fdr_4sets = p.adjust(p_lrt, method = "BH")) %>% arrange(p_lrt)
+  terms_tbl <- bind_rows(lapply(fits, `[[`, "terms")) %>% mutate(threshold = thr)
+  list(omnibus = omnibus_tbl, terms = terms_tbl)
+}
+
+comp_res <- lapply(thr_vec, \(thr) run_compliance_sensitivity(df_long_brain, thr))
+omnibus_comp <- bind_rows(lapply(comp_res, `[[`, "omnibus"))
+terms_comp   <- bind_rows(lapply(comp_res, `[[`, "terms"))
+
+kable(omnibus_comp %>% arrange(threshold, p_lrt), caption = "Compliance: Omnibus by Threshold")
+kable(terms_comp %>% filter(p_fdr < 0.05) %>% arrange(threshold, network, p_fdr), caption = "Compliance: Sig Edges")
+```
+
+## inertia
+
+```{r}
+#lmm
+add_lagged_affect_fixed <- function(dat, affect_var = "na") {
+  dat %>%
+    mutate(
+      datetime = ymd_hms(paste(date, t_start_emo))
+    ) %>%
+    arrange(els_id, datetime) %>%
+    group_by(els_id) %>%
+    mutate(
+      affect_lag1 = lag(.data[[affect_var]]),
+      affect_lag1_mean = mean(affect_lag1, na.rm = TRUE),
+      affect_lag1_dev  = affect_lag1 - affect_lag1_mean
+    ) %>%
+    ungroup()
+}
+
+fit_one_set_inertia_one <- function(dat, edges, set_name, thr = 10) {
+  
+  vars_needed <- c("els_id", "na", "stress_dev", "stress_mean", "age_c", "sex_f", 
+                   "n_valid_prompts", "date", "t_start_emo", edges)
+
+  d_use <- dat %>%
+    filter(n_valid_prompts >= thr) %>%
+    select(all_of(vars_needed)) %>%
+    drop_na() %>%
+   
+    add_lagged_affect_fixed(affect_var = "na") %>%
+    drop_na(affect_lag1_dev, affect_lag1_mean)
+
+  z <- function(x) as.numeric(scale(x))
+  
+  d_use <- d_use %>%
+    mutate(
+      na_z            = z(na),
+      stress_dev_z    = z(stress_dev),
+      stress_mean_z   = z(stress_mean),
+      age_scan_z      = z(age_c),
+      lag1_dev_z      = z(affect_lag1_dev),
+      lag1_mean_z     = z(affect_lag1_mean)
+    )
+
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+
+  f_null <- as.formula(paste0("na_z ~ lag1_dev_z + lag1_mean_z + stress_dev_z + stress_mean_z + age_scan_z + sex_f + (", int_terms, ") + (1 | els_id)"))
+  f_full <- as.formula(paste0("na_z ~ lag1_dev_z + lag1_mean_z + stress_dev_z * (", int_terms, ") + stress_mean_z + age_scan_z + sex_f + (1 | els_id)"))
+
+  m_null <- lmer(f_null, data = d_use, REML = FALSE)
+  m_full <- lmer(f_full, data = d_use, REML = FALSE)
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = length(edges),
+    chisq   = lrt$Chisq[2],
+    p_lrt   = lrt$`Pr(>Chisq)`[2]
+  )
+
+  terms <- broom.mixed::tidy(m_full, effects = "fixed") %>%
+    filter(str_detect(term, ":")) %>%
+    filter(!str_detect(term, "age_c|sex_f")) %>%
+    mutate(
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    select(network, term, estimate, statistic, p.value, p_fdr)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_inertia_one <- imap(edge_sets, \(edges, nm) fit_one_set_inertia_one(df_long_brain, edges, nm, thr = 10))
+
+omnibus_inertia_one <- bind_rows(lapply(fits_inertia_one, `[[`, "omnibus")) %>% 
+  mutate(p_fdr_4sets = p.adjust(p_lrt, method = "BH")) %>% 
+  arrange(p_lrt)
+
+terms_inertia_one <- bind_rows(lapply(fits_inertia_one, `[[`, "terms")) %>%
+  arrange(network, p_fdr)
+
+kable(omnibus_inertia_one, caption = "Inertia (LMM): Omnibus")
+kable(terms_inertia_one %>% filter(p_fdr < 0.05), caption = "Inertia (LMM): Sig Edges")
+```
+
+```{r}
+#ols
+
+fit_one_set_inertia_lm <- function(dat, edges, set_name, thr = 10) {
+  
+  vars_needed <- c("els_id", "na", "stress_dev", "stress_mean", "age_c", "sex_f", 
+                   "n_valid_prompts", "date", "t_start_emo", edges)
+  
+  d_use <- dat %>%
+    filter(n_valid_prompts >= thr) %>%
+    select(all_of(vars_needed)) %>%
+    drop_na() %>%
+    add_lagged_affect_fixed(affect_var = "na") %>% 
+    drop_na(affect_lag1_dev, affect_lag1_mean)
+  
+  z <- function(x) as.numeric(scale(x))
+  
+  d_use <- d_use %>%
+    mutate(
+      na_z            = z(na),
+      stress_dev_z    = z(stress_dev),
+      stress_mean_z   = z(stress_mean),
+      age_scan_z      = z(age_c),
+      lag1_dev_z      = z(affect_lag1_dev),
+      lag1_mean_z     = z(affect_lag1_mean)
+    )
+  
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+  
+  f_null <- as.formula(paste0("na_z ~ lag1_dev_z + lag1_mean_z + stress_dev_z + stress_mean_z + age_scan_z + sex_f + (", int_terms, ")"))
+  f_full <- as.formula(paste0("na_z ~ lag1_dev_z + lag1_mean_z + stress_dev_z * (", int_terms, ") + stress_mean_z + age_scan_z + sex_f"))
+  
+  m_null <- lm(f_null, data = d_use)
+  m_full <- lm(f_full, data = d_use)
+  a <- anova(m_null, m_full)
+  
+  omnibus <- tibble(
+    network = set_name,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = a$Df[2],
+    f       = a$F[2],
+    p_omni  = a$`Pr(>F)`[2]
+  )
+  
+  terms <- broom::tidy(m_full) %>%
+    filter(str_detect(term, ":")) %>%
+    filter(!str_detect(term, "age_c|sex_f")) %>%
+    mutate(
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    select(network, term, estimate, statistic, p.value, p_fdr)
+  
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_lm <- imap(edge_sets, \(edges, nm) fit_one_set_inertia_lm(df_long_brain, edges, nm, thr = 10))
+
+omnibus_lm <- bind_rows(lapply(fits_lm, `[[`, "omnibus")) %>% 
+  mutate(p_fdr_4sets = p.adjust(p_omni, method = "BH")) %>% 
+  arrange(p_omni)
+
+terms_lm <- bind_rows(lapply(fits_lm, `[[`, "terms"))
+
+kable(omnibus_lm, caption = "Inertia (OLS): Omnibus")
+kable(terms_lm %>% filter(p_fdr < 0.05), caption = "Inertia (OLS): Sig Edges")
+```
+
+## residual variance
+
+```{r}
+z <- function(x) as.numeric(scale(x))
+
+fit_one_set_hetero <- function(dat, edges, set_name, thr = 10, outcome = "na", hetero = "varident", by_var = "session_type") {
+  vars_needed <- c("els_id", outcome, "stress_dev", "stress_mean", "age_c", "sex_f", "n_valid_prompts", edges)
+  if (hetero == "varident") vars_needed <- c(vars_needed, by_var)
+
+  d_use <- dat %>%
+    filter(n_valid_prompts >= thr) %>%
+    select(any_of(vars_needed)) %>%
+    drop_na() %>%
+    mutate(
+      y_z           = z(.data[[outcome]]),
+      stress_dev_z  = z(stress_dev),
+      stress_mean_z = z(stress_mean),
+      age_scan_z    = z(age_c)
+    )
+
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+
+  wts <- NULL
+  if (hetero == "varident") {
+    d_use[[by_var]] <- as.factor(d_use[[by_var]])
+    wts <- varIdent(form = as.formula(paste0("~ 1 | ", by_var)))
+  } else if (hetero == "varpower") {
+    d_use <- d_use %>% mutate(stress_dev_abs = abs(stress_dev_z))
+    wts <- varPower(form = ~ stress_dev_abs)
+  }
+
+  f_full <- as.formula(paste0("y_z ~ stress_dev_z * (", int_terms, ") + stress_mean_z + age_scan_z + sex_f"))
+  f_null <- as.formula(paste0("y_z ~ stress_dev_z + stress_mean_z + age_scan_z + sex_f"))
+
+  m_null <- nlme::lme(fixed = f_null, random = ~ 1 | els_id, data = d_use, method = "ML", weights = wts, control = lmeControl(opt = "optim"))
+  m_full <- nlme::lme(fixed = f_full, random = ~ 1 | els_id, data = d_use, method = "ML", weights = wts, control = lmeControl(opt = "optim"))
+
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    hetero  = hetero,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = lrt[2, "df"] - lrt[1, "df"],
+    chisq   = lrt[2, "L.Ratio"],
+    p_lrt   = lrt[2, "p-value"]
+  )
+
+  terms <- broom::tidy(m_full) %>%
+    filter(str_detect(term, "^stress_dev_z:")) %>%
+    mutate(
+      moderator = str_remove(term, "^stress_dev_z:"),
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    transmute(network, moderator, estimate, se = std.error, t = statistic, p = p.value, p_fdr) %>%
+    arrange(p)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_hetero <- imap(edge_sets, \(edges, nm) {
+  fit_one_set_hetero(df_long_brain, edges, nm, thr = 10, outcome = "na", hetero = "varident", by_var = "session_type")
+})
+
+omnibus_hetero <- bind_rows(lapply(fits_hetero, `[[`, "omnibus")) %>% mutate(p_fdr_4sets = p.adjust(p_lrt, method = "BH")) %>% arrange(p_lrt)
+terms_hetero <- bind_rows(lapply(fits_hetero, `[[`, "terms"))
+
+kable(omnibus_hetero, caption = "Residual Variance: Omnibus")
+kable(terms_hetero %>% filter(p_fdr < 0.05), caption = "Residual Variance: Sig Edges")
+```
+
+## mean NA
+
+```{r}
+z <- function(x) as.numeric(scale(x))
+
+add_person_mean_affect <- function(dat, affect_var = "na") {
+  dat %>%
+    group_by(els_id) %>%
+    mutate(
+      na_mean = mean(.data[[affect_var]], na.rm = TRUE),
+      na_dev  = .data[[affect_var]] - na_mean
+    ) %>%
+    ungroup()
+}
+
+fit_one_set_mean_na <- function(dat, edges, set_name, thr = 10) {
+  if (length(edges) == 0) return(NULL)
+
+  vars_needed <- c("els_id","na","stress_dev","stress_mean","age_c","sex_f","n_valid_prompts", edges)
+  d_use <- dat %>%
+    filter(n_valid_prompts >= thr) %>%
+    select(all_of(vars_needed)) %>%
+    drop_na() %>%
+    add_person_mean_affect("na") %>%
+    drop_na(na_mean, na_dev) %>%
+    mutate(
+      na_dev_z      = z(na_dev),
+      na_mean_z     = z(na_mean),
+      stress_dev_z  = z(stress_dev),
+      stress_mean_z = z(stress_mean),
+      age_scan_z    = z(age_c)
+    )
+
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+
+  f_full <- as.formula(paste0("na_dev_z ~ stress_dev_z * (", int_terms, ") + stress_mean_z + na_mean_z + age_scan_z + sex_f + (1 | els_id)"))
+  f_null <- as.formula(paste0("na_dev_z ~ stress_dev_z + stress_mean_z + na_mean_z + age_scan_z + sex_f + (1 | els_id)"))
+
+  m_null <- lmer(f_null, data = d_use, REML = FALSE)
+  m_full <- lmer(f_full, data = d_use, REML = FALSE)
+  lrt <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = length(edges),
+    chisq   = lrt$Chisq[2],
+    p_lrt   = lrt$`Pr(>Chisq)`[2]
+  )
+
+  terms <- broom.mixed::tidy(m_full, effects = "fixed") %>%
+    filter(str_detect(term, "^stress_dev_z:")) %>%
+    mutate(
+      moderator = str_remove(term, "^stress_dev_z:"),
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    transmute(network, moderator, estimate, se = std.error, t = statistic, p = p.value, p_fdr) %>%
+    arrange(p)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_mean_na <- imap(edge_sets, \(edges, nm) fit_one_set_mean_na(df_long_brain, edges, nm, thr = 10))
+omnibus_mean_na <- bind_rows(lapply(fits_mean_na, `[[`, "omnibus")) %>% mutate(p_fdr_4sets = p.adjust(p_lrt, method = "BH")) %>% arrange(p_lrt)
+terms_mean_na <- bind_rows(lapply(fits_mean_na, `[[`, "terms"))
+
+kable(omnibus_mean_na, caption = "Mean NA Control (LMM): Omnibus")
+kable(terms_mean_na %>% filter(p_fdr < 0.05), caption = "Mean NA Control (LMM): Sig Edges")
+```
+
+```{r}
+#OLS
+fit_one_set_mean_na_ols <- function(dat, edges, set_name, thr = 10) {
+  vars_needed <- c("els_id","na","stress_dev","stress_mean","age_c","sex_f","n_valid_prompts", edges)
+
+  d_use <- dat %>%
+    filter(n_valid_prompts >= thr) %>%
+    select(all_of(vars_needed)) %>%
+    drop_na() %>%
+    add_person_mean_affect("na") %>%
+    drop_na(na_mean, na_dev) %>%
+    mutate(
+      na_dev_z      = z(na_dev),
+      na_mean_z     = z(na_mean),
+      stress_dev_z  = z(stress_dev),
+      stress_mean_z = z(stress_mean),
+      age_scan_z    = z(age_c)
+    )
+
+  for (v in edges) d_use[[paste0(v, "_z")]] <- z(d_use[[v]])
+  edge_z <- paste0(edges, "_z")
+  int_terms <- paste(edge_z, collapse = " + ")
+
+  f_full <- as.formula(paste0("na_dev_z ~ stress_dev_z * (", int_terms, ") + stress_mean_z + na_mean_z + age_scan_z + sex_f"))
+  f_null <- as.formula(paste0("na_dev_z ~ stress_dev_z + stress_mean_z + na_mean_z + age_scan_z + sex_f"))
+
+  m_null <- lm(f_null, data = d_use)
+  m_full <- lm(f_full, data = d_use)
+  a <- anova(m_null, m_full)
+
+  omnibus <- tibble(
+    network = set_name,
+    n_rows  = nrow(d_use),
+    n_ids   = n_distinct(d_use$els_id),
+    df      = a$Df[2],
+    f       = a$F[2],
+    p_omni  = a$`Pr(>F)`[2]
+  )
+
+  terms <- broom::tidy(m_full) %>%
+    filter(str_detect(term, "^stress_dev_z:")) %>%
+    mutate(
+      moderator = str_remove(term, "^stress_dev_z:"),
+      network   = set_name,
+      p_fdr     = p.adjust(p.value, method = "BH")
+    ) %>%
+    transmute(network, moderator, estimate, se = std.error, t = statistic, p = p.value, p_fdr)
+
+  list(omnibus = omnibus, terms = terms)
+}
+
+fits_mean_na_ols <- imap(edge_sets, \(edges, nm) fit_one_set_mean_na_ols(df_long_brain, edges, nm, thr = 10))
+omnibus_mean_na_ols <- bind_rows(lapply(fits_mean_na_ols, `[[`, "omnibus")) %>% mutate(p_fdr_4sets = p.adjust(p_omni, method = "BH")) %>% arrange(p_omni)
+terms_mean_na_ols <- bind_rows(lapply(fits_mean_na_ols, `[[`, "terms"))
+
+kable(omnibus_mean_na_ols, caption = "Mean NA Control (OLS): Omnibus")
+kable(terms_mean_na_ols %>% filter(p_fdr < 0.05), caption = "Mean NA Control (OLS): Sig Edges")
+```
