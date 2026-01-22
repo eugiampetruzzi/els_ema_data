@@ -1280,5 +1280,8 @@ print(paste(total_participants))
 print(paste(total_rows))
 ```
 
+```{r}
+write.csv(ema_flags_master, "/Users/eu/Documents/GitHub/els_ema_data/data/clean/ema_flags_master.csv", row.names = FALSE)
+```
 
 
